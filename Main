@@ -1,0 +1,904 @@
+import random
+import tkinter as tk
+from tkinter import messagebox, font
+from abc import ABC, abstractmethod
+
+# =========================
+# === GAME STATE & DATA ===
+# =========================
+
+game_state = {
+    "day": 1,
+    "food": 20,
+    "medicine": 5,
+    "ammo": 10,
+    "scrap": 10,
+    "shelter_health": 100,
+    "max_shelter_health": 100,
+    "grid_size": 5,
+    "max_grid_size": 10,
+    # 0 = empty, 1 = wall, 2 = door, 3 = trap, 5 = reinforced wall (simplified use: 0/1 for now)
+    "shelter_grid": [],
+    # 0 = destroyed, 1 = damaged, 2 = healthy, 3 = reinforced (we'll use 0/2 for now)
+    "grid_health": [],
+    "survivors": [
+        {"name": "John", "health": 100, "max_health": 100, "role": "Combatant", "hunger": 0},
+        {"name": "Jamie", "health": 100, "max_health": 100, "role": "Healer", "hunger": 0},
+        {"name": "Taylor", "health": 100, "max_health": 100, "role": "Builder", "hunger": 0},
+    ],
+    "current_survivor": None,
+    "in_hunt": False,
+    "current_monster": None,
+    "blocking": False,
+    "design_mode": False,
+    "repair_mode": False,
+}
+
+# Initialize grid arrays based on grid_size
+def init_grid(size):
+    game_state["shelter_grid"] = [[0 for _ in range(size)] for _ in range(size)]
+    game_state["grid_health"] = [[2 for _ in range(size)] for _ in range(size)]
+
+init_grid(game_state["grid_size"])
+
+# =====================
+# === ROLE SYSTEM   ===
+# =====================
+
+class Role(ABC):
+    @abstractmethod
+    def perform_attack(self):
+        pass
+
+    def perform_heal(self, state):
+        return 0
+
+    def perform_build(self, state):
+        return 0
+
+class Combatant(Role):
+    def perform_attack(self):
+        return random.randint(5, 10)
+
+class Healer(Role):
+    def perform_attack(self):
+        return random.randint(3, 7)
+
+    def perform_heal(self, state):
+        if state["medicine"] > 0:
+            heal_amount = random.randint(10, 20)
+            state["medicine"] -= 1
+            return heal_amount
+        return 0
+
+class Builder(Role):
+    def perform_attack(self):
+        return random.randint(2, 5)
+
+    def perform_build(self, state):
+        scrap_gain = random.randint(1, 3)
+        state["scrap"] += scrap_gain
+        return scrap_gain
+
+# ========================
+# === DISASTER SYSTEM  ===
+# ========================
+
+class Disaster(ABC):
+    @abstractmethod
+    def apply(self, state):
+        pass
+
+class ZombieRaid(Disaster):
+    def apply(self, state):
+        num_zombies = random.randint(2, 4)
+        survivors = state["survivors"]
+        for _ in range(num_zombies):
+            if survivors:
+                survivor = random.choice(survivors)
+                damage = random.randint(5, 15)
+                survivor["health"] -= damage
+                slow_print(f"{survivor['name']} takes {damage} damage from zombies!")
+                if survivor["health"] <= 0:
+                    survivors.remove(survivor)
+                    slow_print(f"{survivor['name']} has died.")
+            else:
+                break
+
+        # Damage random tiles in the shelter grid
+        if state["grid_size"] > 0:
+            hits = random.randint(1, 3)
+            for _ in range(hits):
+                x = random.randint(0, state["grid_size"] - 1)
+                y = random.randint(0, state["grid_size"] - 1)
+                if state["grid_health"][x][y] > 0:
+                    state["grid_health"][x][y] -= 1
+                    slow_print(f"Zombies damage the shelter at ({x},{y})!")
+            # If many tiles damaged, shelter health suffers
+            state["shelter_health"] = max(0, state["shelter_health"] - random.randint(5, 15))
+            slow_print("Zombies breach weak points! Shelter takes damage!")
+
+class Storm(Disaster):
+    def apply(self, state):
+        damage = random.randint(10, 20)
+        state["food"] = max(0, state["food"] - damage)
+        state["medicine"] = max(0, state["medicine"] - damage // 2)
+        roof_damage = random.randint(5, 15)
+        state["shelter_health"] = max(0, state["shelter_health"] - roof_damage)
+        slow_print(f"A storm destroys {damage} food and {damage // 2} medicine! Roof takes {roof_damage} damage!")
+
+        # Randomly damage tiles
+        if state["grid_size"] > 0:
+            hits = random.randint(1, 3)
+            for _ in range(hits):
+                x = random.randint(0, state["grid_size"] - 1)
+                y = random.randint(0, state["grid_size"] - 1)
+                if state["grid_health"][x][y] > 0:
+                    state["grid_health"][x][y] -= 1
+                    slow_print(f"Storm batters the shelter at ({x},{y})!")
+
+class SupplyDrop(Disaster):
+    def apply(self, state):
+        food_gain = random.randint(5, 10)
+        med_gain = random.randint(2, 5)
+        scrap_gain = random.randint(2, 6)
+        state["food"] += food_gain
+        state["medicine"] += med_gain
+        state["scrap"] += scrap_gain
+        slow_print(f"A supply drop arrives! +{food_gain} food, +{med_gain} medicine, +{scrap_gain} scrap.")
+
+class RadiationLeak(Disaster):
+    def apply(self, state):
+        for survivor in state["survivors"][:]:
+            damage = random.randint(5, 10)
+            survivor["health"] -= damage
+            slow_print(f"Radiation leak! {survivor['name']} takes {damage} damage.")
+            if survivor["health"] <= 0:
+                state["survivors"].remove(survivor)
+                slow_print(f"{survivor['name']} has died.")
+        damage = random.randint(10, 20)
+        state["shelter_health"] = max(0, state["shelter_health"] - damage)
+        slow_print(f"Radiation corrodes the shelter! Takes {damage} damage!")
+
+# ====================
+# === TEXT OUTPUT  ===
+# ====================
+
+def slow_print(text, speed=0.01):
+    text_area.insert(tk.END, "\n")
+    for char in text:
+        text_area.insert(tk.END, char)
+        text_area.see(tk.END)
+        root.update()
+        root.after(int(speed * 50), lambda: None)
+    text_area.insert(tk.END, "\n")
+
+# =========================
+# === SHELTER MANAGEMENT ===
+# =========================
+
+def assign_role(survivor, role_instance):
+    if survivor is None:
+        messagebox.showwarning("Warning", "Select a survivor first!")
+        return
+    survivor["role"] = role_instance.__class__.__name__
+    survivor["role_instance"] = role_instance
+    slow_print(f"{survivor['name']} is now a {role_instance.__class__.__name__}.")
+    update_shelter_ui()
+
+def end_day():
+    if game_state["in_hunt"]:
+        messagebox.showwarning("Warning", "Finish the hunt first!")
+        return
+
+    # Update hunger and health
+    for survivor in game_state["survivors"][:]:
+        survivor["hunger"] += random.randint(1, 3)
+        if survivor["hunger"] >= 10:
+            survivor["health"] -= 5
+            slow_print(f"{survivor['name']} is starving! Health reduced.")
+        if survivor["health"] <= 0:
+            game_state["survivors"].remove(survivor)
+            slow_print(f"{survivor['name']} has died.")
+
+    # Consume food
+    game_state["food"] -= len(game_state["survivors"])
+    if game_state["food"] < 0:
+        game_state["food"] = 0
+
+    # Trigger random disaster
+    disasters = [ZombieRaid(), Storm(), SupplyDrop(), RadiationLeak()]
+    disaster = random.choice(disasters)
+    disaster_name = disaster.__class__.__name__
+
+    descriptions = {
+        "ZombieRaid": [
+            "A violent zombie raid shakes the shelter!",
+            "A fierce group of zombies attacks!",
+            "Chaotic screams echo as zombies breach the walls!",
+        ],
+        "Storm": [
+            "A devastating storm destroys supplies!",
+            "Heavy rain and wind wreak havoc!",
+            "A wild storm batters the shelter!",
+        ],
+        "SupplyDrop": [
+            "An unexpected supply drop arrives!",
+            "A mysterious package falls from the sky!",
+            "Lucky find! Supplies delivered!",
+        ],
+        "RadiationLeak": [
+            "A toxic radiation leak poisons the air!",
+            "Deadly radiation spreads through the shelter!",
+            "A hazardous leak threatens everyone!",
+        ],
+    }
+
+    description = random.choice(descriptions.get(disaster_name, ["A chaotic disaster strikes the shelter!"]))
+    slow_print(f"\nDay {game_state['day']} ends. {description}")
+    disaster.apply(game_state)
+    game_state["day"] += 1
+
+    # Check game over
+    if (
+        game_state["food"] <= 0
+        or len(game_state["survivors"]) == 0
+        or game_state["shelter_health"] <= 0
+    ):
+        slow_print("\nGame Over! You did not survive.")
+        disable_combat_buttons()
+        end_hunt_button.config(state=tk.DISABLED)
+        end_day_button.config(state=tk.DISABLED)
+        expand_button.config(state=tk.DISABLED)
+        design_button.config(state=tk.DISABLED)
+        repair_button.config(state=tk.DISABLED)
+    else:
+        slow_print(f"\nDay {game_state['day']} begins.")
+        update_shelter_ui()
+
+# =========================
+# === HUNT / COMBAT     ===
+# =========================
+
+monster_list = [
+    {"name": "Zombie", "health": 15, "attack": 3},
+    {"name": "Bloated Zombie", "health": 20, "attack": 4},
+    {"name": "Fast Zombie", "health": 12, "attack": 5},
+]
+
+def start_hunt():
+    if game_state["in_hunt"]:
+        messagebox.showwarning("Warning", "Already in a hunt!")
+        return
+    if not game_state["survivors"]:
+        messagebox.showwarning("Warning", "No survivors left to hunt!")
+        return
+
+    game_state["in_hunt"] = True
+    survivor = random.choice(game_state["survivors"])
+    game_state["current_survivor"] = survivor
+
+    # Ensure role_instance exists
+    if "role_instance" not in survivor:
+        role_map = {"Combatant": Combatant, "Healer": Healer, "Builder": Builder}
+        role_cls = role_map.get(survivor["role"], Combatant)
+        survivor["role_instance"] = role_cls()
+
+    game_state["current_monster"] = random.choice(monster_list).copy()
+    game_state["blocking"] = False
+
+    slow_print("\nStarting a hunt mission...")
+    slow_print(f"{survivor['name']} is hunting...")
+    slow_print(f"\nA {game_state['current_monster']['name']} appears!")
+
+    enable_combat_buttons()
+    start_hunt_button.config(state=tk.DISABLED)
+    end_hunt_button.config(state=tk.NORMAL)
+
+    update_hunt_ui()
+    update_combat_ui()
+
+def end_hunt():
+    if not game_state["in_hunt"]:
+        messagebox.showwarning("Warning", "No active hunt!")
+        return
+
+    game_state["in_hunt"] = False
+    game_state["current_survivor"] = None
+    game_state["current_monster"] = None
+    game_state["blocking"] = False
+
+    disable_combat_buttons()
+    start_hunt_button.config(state=tk.NORMAL)
+    end_hunt_button.config(state=tk.DISABLED)
+
+    slow_print("\nHunt mission ended.")
+    update_hunt_ui()
+    update_combat_ui()
+
+def player_turn(action):
+    survivor = game_state["current_survivor"]
+    monster = game_state["current_monster"]
+    if survivor is None or monster is None:
+        return
+
+    role_inst = survivor.get("role_instance", None)
+
+    if action == "attack":
+        if role_inst:
+            damage = role_inst.perform_attack()
+        else:
+            damage = random.randint(3, 7)
+        monster["health"] -= damage
+        slow_print(f"\n{survivor['name']} strikes the {monster['name']} for {damage} damage!")
+        game_state["blocking"] = False
+
+    elif action == "block":
+        game_state["blocking"] = True
+        slow_print(f"\n{survivor['name']} braces to block incoming attacks.")
+
+    elif action == "use_medicine":
+        if role_inst and hasattr(role_inst, "perform_heal"):
+            heal_amount = role_inst.perform_heal(game_state)
+            if heal_amount > 0 and survivor["health"] < survivor["max_health"]:
+                survivor["health"] = min(survivor["max_health"], survivor["health"] + heal_amount)
+                slow_print(f"\n{survivor['name']} uses medicine and heals {heal_amount} HP.")
+                game_state["blocking"] = False
+            else:
+                slow_print("\nNo effective healing possible (no medicine or health full).")
+                return
+        else:
+            slow_print("\nThis survivor cannot use medicine effectively.")
+            return
+
+    elif action == "run":
+        if random.randint(1, 2) == 1:
+            slow_print(f"\n{survivor['name']} escapes successfully!")
+            end_hunt()
+            return
+        else:
+            slow_print(f"\n{survivor['name']} fails to escape!")
+            game_state["blocking"] = False
+
+    # Monster defeated?
+    if monster["health"] <= 0:
+        slow_print(f"\nYou defeated the {monster['name']}!")
+        # Rewards based on role
+        if survivor["role"] == "Combatant":
+            ammo_found = random.randint(1, 3)
+            game_state["ammo"] += ammo_found
+            slow_print(f"Found {ammo_found} ammo!")
+        elif survivor["role"] == "Healer":
+            med_found = random.randint(1, 2)
+            game_state["medicine"] += med_found
+            slow_print(f"Found {med_found} medicine!")
+        elif survivor["role"] == "Builder":
+            scrap_found = random.randint(1, 3)
+            game_state["scrap"] += scrap_found
+            slow_print(f"Found {scrap_found} scrap metal!")
+        end_hunt()
+        update_shelter_ui()
+        return
+
+    enemy_turn()
+
+def enemy_turn():
+    survivor = game_state["current_survivor"]
+    monster = game_state["current_monster"]
+    if survivor is None or monster is None:
+        return
+
+    # Monster may "block" (flavour)
+    if random.randint(1, 6) == 6:
+        monster["blocking"] = True
+        slow_print(f"\nThe {monster['name']} raises its guard and prepares to block!")
+    else:
+        monster["blocking"] = False
+
+    damage = monster["attack"]
+    if game_state["blocking"]:
+        damage = max(1, damage // 2)
+        slow_print(f"{survivor['name']} blocks part of the attack!")
+    survivor["health"] -= damage
+    slow_print(f"\nThe {monster['name']} attacks! {survivor['name']} takes {damage} damage.")
+
+    if survivor["health"] <= 0:
+        slow_print(f"\n{survivor['name']} has died.")
+        if survivor in game_state["survivors"]:
+            game_state["survivors"].remove(survivor)
+        end_hunt()
+        update_shelter_ui()
+        return
+
+    update_hunt_ui()
+    update_combat_ui()
+
+# ============================
+# === SHELTER BUILD / GRID ===
+# ============================
+
+grid_buttons = []
+
+def rebuild_grid_ui():
+    """Rebuild the grid buttons when grid size changes."""
+    for widget in grid_frame.winfo_children():
+        widget.destroy()
+    grid_buttons.clear()
+
+    size = game_state["grid_size"]
+    for i in range(size):
+        row = []
+        for j in range(size):
+            btn = tk.Button(
+                grid_frame,
+                text="",
+                width=3,
+                height=1,
+                command=lambda x=i, y=j: on_grid_click(x, y),
+                state=tk.DISABLED,
+                bg="#4CAF50"
+            )
+            btn.grid(row=i, column=j, padx=2, pady=2)
+            row.append(btn)
+        grid_buttons.append(row)
+
+    update_grid_ui()
+
+def update_grid_ui():
+    """Update colors of grid tiles based on type and health."""
+    size = game_state["grid_size"]
+    for i in range(size):
+        for j in range(size):
+            tile = game_state["shelter_grid"][i][j]
+            health = game_state["grid_health"][i][j]
+            if tile == 1:  # wall
+                if health <= 0:
+                    color = "#795548"  # destroyed wall
+                elif health == 1:
+                    color = "#FF9800"  # damaged
+                else:
+                    color = "#333333"  # healthy wall
+            else:  # empty
+                if health <= 0:
+                    color = "#9E9E9E"  # rubble
+                else:
+                    color = "#8BC34A"  # empty healthy
+            grid_buttons[i][j].config(bg=color)
+
+def toggle_design_mode():
+    game_state["design_mode"] = not game_state["design_mode"]
+    game_state["repair_mode"] = False
+
+    if game_state["design_mode"]:
+        design_button.config(text="Finish Design", bg="#4CAF50")
+        repair_button.config(state=tk.DISABLED)
+        slow_print("\nDesign Mode: Click tiles to build/remove walls. Building a wall costs 1 scrap, removing refunds 0.5 scrap (rounded down).")
+        size = game_state["grid_size"]
+        for i in range(size):
+            for j in range(size):
+                grid_buttons[i][j].config(state=tk.NORMAL)
+    else:
+        design_button.config(text="Design Shelter", bg="#FF9800")
+        repair_button.config(state=tk.NORMAL)
+        size = game_state["grid_size"]
+        for i in range(size):
+            for j in range(size):
+                grid_buttons[i][j].config(state=tk.DISABLED)
+    update_grid_ui()
+
+def toggle_repair_mode():
+    if game_state["current_survivor"] is None or game_state["current_survivor"].get("role") != "Builder":
+        messagebox.showwarning("Warning", "Select a Builder to repair the shelter!")
+        return
+
+    game_state["repair_mode"] = not game_state["repair_mode"]
+    game_state["design_mode"] = False
+
+    if game_state["repair_mode"]:
+        repair_button.config(text="Finish Repair", bg="#4CAF50")
+        design_button.config(state=tk.DISABLED)
+        slow_print("\nRepair Mode: Click damaged/destroyed tiles to repair. Repair costs 1 scrap (damaged) or 3 scrap (destroyed).")
+        size = game_state["grid_size"]
+        for i in range(size):
+            for j in range(size):
+                grid_buttons[i][j].config(state=tk.NORMAL)
+    else:
+        repair_button.config(text="Repair Shelter", bg="#FF9800")
+        design_button.config(state=tk.NORMAL)
+        size = game_state["grid_size"]
+        for i in range(size):
+            for j in range(size):
+                grid_buttons[i][j].config(state=tk.DISABLED)
+    update_grid_ui()
+
+def on_grid_click(x, y):
+    """Handle clicks on shelter grid depending on mode."""
+    if game_state["design_mode"]:
+        # Build/remove walls
+        tile = game_state["shelter_grid"][x][y]
+        if tile == 0:
+            # Build wall if enough scrap
+            if game_state["scrap"] >= 1:
+                game_state["scrap"] -= 1
+                game_state["shelter_grid"][x][y] = 1
+                game_state["grid_health"][x][y] = 2
+                slow_print(f"Built a wall at ({x},{y}). -1 scrap.")
+            else:
+                messagebox.showwarning("Warning", "Not enough scrap to build a wall!")
+        else:
+            # Remove wall, refund half scrap
+            game_state["shelter_grid"][x][y] = 0
+            game_state["grid_health"][x][y] = 2
+            refund = 0  # keep it simple; you can change to 1 if you want
+            game_state["scrap"] += refund
+            slow_print(f"Removed a wall at ({x},{y}). +{refund} scrap.")
+        update_shelter_ui()
+
+    elif game_state["repair_mode"]:
+        tile = game_state["shelter_grid"][x][y]
+        health = game_state["grid_health"][x][y]
+        if health >= 2:
+            slow_print(f"Tile at ({x},{y}) is already healthy.")
+            return
+        # Damaged or destroyed
+        if health == 1:
+            cost = 1
+        else:  # 0
+            cost = 3
+        if game_state["scrap"] < cost:
+            messagebox.showwarning("Warning", f"Not enough scrap to repair (need {cost}).")
+            return
+        game_state["scrap"] -= cost
+        game_state["grid_health"][x][y] = 2
+        if tile == 0:
+            # Rebuild as wall
+            game_state["shelter_grid"][x][y] = 1
+        game_state["shelter_health"] = min(
+            game_state["max_shelter_health"], game_state["shelter_health"] + 5
+        )
+        slow_print(f"Repaired tile at ({x},{y}). -{cost} scrap, +5 shelter health.")
+        update_shelter_ui()
+
+def expand_shelter():
+    """Expand the shelter grid by +1 border, up to max_grid_size."""
+    size = game_state["grid_size"]
+    if size >= game_state["max_grid_size"]:
+        messagebox.showinfo("Info", "Shelter is already at maximum size.")
+        return
+    if game_state["scrap"] < 10:
+        messagebox.showwarning("Warning", "Need 10 scrap to expand the shelter!")
+        return
+
+    # Check if a Builder is alive
+    if not any(s["role"] == "Builder" for s in game_state["survivors"]):
+        messagebox.showwarning("Warning", "You need a Builder to expand the shelter!")
+        return
+
+    game_state["scrap"] -= 10
+    new_size = size + 1
+
+    # Expand shelter_grid and grid_health
+    for row in game_state["shelter_grid"]:
+        row.append(0)
+    game_state["shelter_grid"].append([0 for _ in range(new_size)])
+
+    for row in game_state["grid_health"]:
+        row.append(2)
+    game_state["grid_health"].append([2 for _ in range(new_size)])
+
+    game_state["grid_size"] = new_size
+    slow_print(f"Shelter expanded to {new_size}x{new_size}! -10 scrap.")
+    rebuild_grid_ui()
+    update_shelter_ui()
+
+# =====================
+# === UI UPDATES    ===
+# =====================
+
+def update_shelter_ui():
+    day_label.config(text=f"Day: {game_state['day']}")
+    food_label.config(text=f"Food: {game_state['food']}")
+    medicine_label.config(text=f"Medicine: {game_state['medicine']}")
+    ammo_label.config(text=f"Ammo: {game_state['ammo']}")
+    scrap_label.config(text=f"Scrap: {game_state['scrap']}")
+    shelter_hp_label.config(text=f"Shelter HP: {game_state['shelter_health']}/{game_state['max_shelter_health']}")
+    grid_size_label.config(text=f"Shelter Size: {game_state['grid_size']}x{game_state['grid_size']}")
+
+    survivors_text = "Survivors:\n"
+    for survivor in game_state["survivors"]:
+        health_status = f"Health: {survivor['health']}/{survivor['max_health']}"
+        hunger_status = f"Hunger: {survivor['hunger']}"
+        role_status = f"Role: {survivor['role']}"
+        survivors_text += f"- {survivor['name']} ({health_status}, {hunger_status}, {role_status})\n"
+    survivors_label.config(text=survivors_text)
+
+    update_grid_ui()
+
+def update_hunt_ui():
+    if game_state["in_hunt"] and game_state["current_survivor"]:
+        s = game_state["current_survivor"]
+        health_label.config(text=f"{s['name']}'s HP: {s['health']}/{s['max_health']}")
+    else:
+        health_label.config(text="")
+
+def update_combat_ui():
+    if game_state["in_hunt"] and game_state["current_monster"]:
+        m = game_state["current_monster"]
+        monster_label.config(text=f"Monster: {m['name']} (HP: {m['health']})")
+    else:
+        monster_label.config(text="")
+
+def select_survivor(survivor):
+    game_state["current_survivor"] = survivor
+    slow_print(f"\nSelected {survivor['name']} for role assignment or actions.")
+    update_shelter_ui()
+
+def enable_combat_buttons():
+    attack_button.config(state=tk.NORMAL)
+    block_button.config(state=tk.NORMAL)
+    potion_button.config(state=tk.NORMAL)
+    run_button.config(state=tk.NORMAL)
+
+def disable_combat_buttons():
+    attack_button.config(state=tk.DISABLED)
+    block_button.config(state=tk.DISABLED)
+    potion_button.config(state=tk.DISABLED)
+    run_button.config(state=tk.DISABLED)
+
+# =====================
+# === TKINTER SETUP ===
+# =====================
+
+root = tk.Tk()
+root.title("Zombie Survival Shelter - Unified Version")
+root.geometry("1000x800")
+
+custom_font = font.Font(family="Helvetica", size=10)
+title_font = font.Font(family="Helvetica", size=12, weight="bold")
+
+# Main layout: 3 rows, 2 columns
+root.grid_rowconfigure(0, weight=1)
+root.grid_rowconfigure(1, weight=2)
+root.grid_rowconfigure(2, weight=1)
+root.grid_columnconfigure(0, weight=1)
+root.grid_columnconfigure(1, weight=1)
+
+# === TOP: Shelter Grid ===
+top_frame = tk.Frame(root)
+top_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=10, pady=5)
+top_frame.grid_columnconfigure(0, weight=1)
+
+shelter_title = tk.Label(top_frame, text="Shelter Layout", font=title_font)
+shelter_title.grid(row=0, column=0, pady=5)
+
+grid_frame = tk.Frame(top_frame)
+grid_frame.grid(row=1, column=0, pady=5)
+
+# Build initial grid UI
+rebuild_grid_ui()
+
+# === LEFT MIDDLE: Stats & Survivors ===
+left_frame = tk.Frame(root)
+left_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+left_frame.grid_rowconfigure(0, weight=0)
+left_frame.grid_rowconfigure(1, weight=1)
+left_frame.grid_rowconfigure(2, weight=0)
+left_frame.grid_rowconfigure(3, weight=0)
+left_frame.grid_rowconfigure(4, weight=0)
+left_frame.grid_columnconfigure(0, weight=1)
+
+stats_frame = tk.LabelFrame(left_frame, text="Resources & Shelter", font=title_font)
+stats_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+stats_frame.grid_columnconfigure(0, weight=1)
+
+day_label = tk.Label(stats_frame, text="", font=custom_font)
+day_label.grid(row=0, column=0, sticky="w")
+food_label = tk.Label(stats_frame, text="", font=custom_font)
+food_label.grid(row=1, column=0, sticky="w")
+medicine_label = tk.Label(stats_frame, text="", font=custom_font)
+medicine_label.grid(row=2, column=0, sticky="w")
+ammo_label = tk.Label(stats_frame, text="", font=custom_font)
+ammo_label.grid(row=3, column=0, sticky="w")
+scrap_label = tk.Label(stats_frame, text="", font=custom_font)
+scrap_label.grid(row=4, column=0, sticky="w")
+shelter_hp_label = tk.Label(stats_frame, text="", font=custom_font)
+shelter_hp_label.grid(row=5, column=0, sticky="w")
+grid_size_label = tk.Label(stats_frame, text="", font=custom_font)
+grid_size_label.grid(row=6, column=0, sticky="w")
+
+survivors_frame = tk.LabelFrame(left_frame, text="Survivors", font=title_font)
+survivors_frame.grid(row=1, column=0, sticky="nsew", pady=5)
+survivors_frame.grid_columnconfigure(0, weight=1)
+
+survivors_label = tk.Label(survivors_frame, text="", font=custom_font, justify=tk.LEFT)
+survivors_label.grid(row=0, column=0, sticky="w")
+
+# Role selection
+role_select_frame = tk.LabelFrame(left_frame, text="Select Survivor", font=title_font)
+role_select_frame.grid(row=2, column=0, sticky="nsew", pady=5)
+
+for i, survivor in enumerate(game_state["survivors"]):
+    tk.Button(
+        role_select_frame,
+        text=survivor["name"],
+        command=lambda s=survivor: select_survivor(s),
+        font=custom_font,
+        bg="#4CAF50",
+        fg="white"
+    ).grid(row=0, column=i, padx=3, pady=3)
+
+role_assign_frame = tk.LabelFrame(left_frame, text="Assign Role", font=title_font)
+role_assign_frame.grid(row=3, column=0, sticky="nsew", pady=5)
+
+tk.Button(
+    role_assign_frame,
+    text="Combatant",
+    command=lambda: assign_role(game_state["current_survivor"], Combatant()),
+    font=custom_font,
+    bg="#2196F3",
+    fg="white"
+).grid(row=0, column=0, padx=3, pady=3)
+
+tk.Button(
+    role_assign_frame,
+    text="Healer",
+    command=lambda: assign_role(game_state["current_survivor"], Healer()),
+    font=custom_font,
+    bg="#FF5722",
+    fg="white"
+).grid(row=0, column=1, padx=3, pady=3)
+
+tk.Button(
+    role_assign_frame,
+    text="Builder",
+    command=lambda: assign_role(game_state["current_survivor"], Builder()),
+    font=custom_font,
+    bg="#FFC107",
+    fg="black"
+).grid(row=0, column=2, padx=3, pady=3)
+
+build_frame = tk.LabelFrame(left_frame, text="Shelter Actions", font=title_font)
+build_frame.grid(row=4, column=0, sticky="nsew", pady=5)
+
+design_button = tk.Button(
+    build_frame,
+    text="Design Shelter",
+    command=toggle_design_mode,
+    font=custom_font,
+    bg="#FF9800",
+    fg="white"
+)
+design_button.grid(row=0, column=0, padx=3, pady=3)
+
+repair_button = tk.Button(
+    build_frame,
+    text="Repair Shelter",
+    command=toggle_repair_mode,
+    font=custom_font,
+    bg="#FF9800",
+    fg="white"
+)
+repair_button.grid(row=0, column=1, padx=3, pady=3)
+
+expand_button = tk.Button(
+    build_frame,
+    text="Expand Shelter",
+    command=expand_shelter,
+    font=custom_font,
+    bg="#9C27B0",
+    fg="white"
+)
+expand_button.grid(row=0, column=2, padx=3, pady=3)
+
+end_day_button = tk.Button(
+    left_frame,
+    text="End Day",
+    command=end_day,
+    font=title_font,
+    bg="#F44336",
+    fg="white"
+)
+end_day_button.grid(row=5, column=0, pady=5)
+
+# === RIGHT MIDDLE: Log ===
+right_frame = tk.Frame(root)
+right_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=5)
+right_frame.grid_rowconfigure(0, weight=1)
+right_frame.grid_columnconfigure(0, weight=1)
+
+text_area = tk.Text(right_frame, wrap=tk.WORD, font=custom_font)
+text_area.grid(row=0, column=0, sticky="nsew")
+scrollbar = tk.Scrollbar(right_frame, command=text_area.yview)
+scrollbar.grid(row=0, column=1, sticky="ns")
+text_area.config(yscrollcommand=scrollbar.set)
+
+# === BOTTOM: Hunt & Combat ===
+bottom_frame = tk.Frame(root)
+bottom_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=10, pady=5)
+bottom_frame.grid_columnconfigure(0, weight=1)
+bottom_frame.grid_columnconfigure(1, weight=1)
+
+hunt_frame = tk.LabelFrame(bottom_frame, text="Hunt Mode", font=title_font)
+hunt_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+
+start_hunt_button = tk.Button(
+    hunt_frame,
+    text="Start Hunt",
+    command=start_hunt,
+    font=custom_font,
+    bg="#4CAF50",
+    fg="white"
+)
+start_hunt_button.grid(row=0, column=0, padx=5, pady=5)
+
+end_hunt_button = tk.Button(
+    hunt_frame,
+    text="End Hunt",
+    command=end_hunt,
+    state=tk.DISABLED,
+    font=custom_font,
+    bg="#F44336",
+    fg="white"
+)
+end_hunt_button.grid(row=0, column=1, padx=5, pady=5)
+
+combat_frame = tk.LabelFrame(bottom_frame, text="Combat", font=title_font)
+combat_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+
+attack_button = tk.Button(
+    combat_frame,
+    text="Attack",
+    command=lambda: player_turn("attack"),
+    state=tk.DISABLED,
+    font=custom_font,
+    bg="#2196F3",
+    fg="white"
+)
+attack_button.grid(row=0, column=0, padx=5, pady=5)
+
+block_button = tk.Button(
+    combat_frame,
+    text="Block",
+    command=lambda: player_turn("block"),
+    state=tk.DISABLED,
+    font=custom_font,
+    bg="#FF9800",
+    fg="white"
+)
+block_button.grid(row=0, column=1, padx=5, pady=5)
+
+potion_button = tk.Button(
+    combat_frame,
+    text="Use Medicine",
+    command=lambda: player_turn("use_medicine"),
+    state=tk.DISABLED,
+    font=custom_font,
+    bg="#8BC34A",
+    fg="white"
+)
+potion_button.grid(row=0, column=2, padx=5, pady=5)
+
+run_button = tk.Button(
+    combat_frame,
+    text="Run",
+    command=lambda: player_turn("run"),
+    state=tk.DISABLED,
+    font=custom_font,
+    bg="#F44336",
+    fg="white"
+)
+
+run_button.grid(row=0, column=3, padx=5, pady=5)
+
+health_label = tk.Label(bottom_frame, text="", font=custom_font)
+health_label.grid(row=1, column=0, sticky="w", padx=10)
+
+monster_label = tk.Label(bottom_frame, text="", font=custom_font)
+monster_label.grid(row=1, column=1, sticky="w", padx=10)
+
+# === INIT ===
+update_shelter_ui()
+slow_print("Welcome to Zombie Survival Shelter (Unified Version)!")
+slow_print("Manage your survivors, build and expand your shelter, and survive as long as you can.")
+
+root.mainloop()
