@@ -31,6 +31,7 @@ game_state = {
     "design_mode": False,
     "repair_mode": False,
     "in_scavenge": False,
+    "current_scavenge_location": None,
 }
 
 def init_grid(size):
@@ -38,6 +39,10 @@ def init_grid(size):
     game_state["grid_health"] = [[2 for _ in range(size)] for _ in range(size)]
 
 init_grid(game_state["grid_size"])
+
+def max_survivors():
+    # survivor cap scales with shelter size
+    return game_state["grid_size"] * 2
 
 # =====================
 # === ROLE SYSTEM   ===
@@ -54,9 +59,12 @@ class Role(ABC):
     def perform_build(self, state):
         return 0
 
+    def scavenge_bonus(self, state):
+        return {}
+
 class Combatant(Role):
     def perform_attack(self):
-        return random.randint(5, 10)
+        return random.randint(6, 12)
 
 class Healer(Role):
     def perform_attack(self):
@@ -64,7 +72,7 @@ class Healer(Role):
 
     def perform_heal(self, state):
         if state["medicine"] > 0:
-            heal_amount = random.randint(10, 20)
+            heal_amount = random.randint(12, 22)
             state["medicine"] -= 1
             return heal_amount
         return 0
@@ -74,9 +82,26 @@ class Builder(Role):
         return random.randint(2, 5)
 
     def perform_build(self, state):
-        scrap_gain = random.randint(1, 3)
+        scrap_gain = random.randint(2, 4)
         state["scrap"] += scrap_gain
         return scrap_gain
+
+class Scout(Role):
+    # Better scavenge outcomes, slightly weaker attack
+    def perform_attack(self):
+        return random.randint(4, 8)
+
+    def scavenge_bonus(self, state):
+        # Increase chance of good finds, reduce ambush chance
+        return {
+            "good_find_bonus": 10,
+            "ambush_penalty": -5,
+        }
+
+class Guardian(Role):
+    # Stronger block / tank
+    def perform_attack(self):
+        return random.randint(4, 9)
 
 # ========================
 # === DISASTER SYSTEM  ===
@@ -155,6 +180,20 @@ class RadiationLeak(Disaster):
         state["shelter_health"] = max(0, state["shelter_health"] - damage)
         slow_print(f"Radiation corrodes the shelter! Takes {damage} damage!")
 
+class Famine(Disaster):
+    def apply(self, state):
+        loss = random.randint(5, 15)
+        state["food"] = max(0, state["food"] - loss)
+        slow_print(f"A creeping famine spoils {loss} food. Hunger grows.")
+
+class BanditRaid(Disaster):
+    def apply(self, state):
+        stolen_food = min(state["food"], random.randint(3, 10))
+        stolen_med = min(state["medicine"], random.randint(1, 3))
+        state["food"] -= stolen_food
+        state["medicine"] -= stolen_med
+        slow_print(f"Bandits raid the outskirts! They steal {stolen_food} food and {stolen_med} medicine.")
+
 # ====================
 # === TEXT OUTPUT  ===
 # ====================
@@ -199,7 +238,7 @@ def end_day():
     if game_state["food"] < 0:
         game_state["food"] = 0
 
-    disasters = [ZombieRaid(), Storm(), SupplyDrop(), RadiationLeak()]
+    disasters = [ZombieRaid(), Storm(), SupplyDrop(), RadiationLeak(), Famine(), BanditRaid()]
     disaster = random.choice(disasters)
     disaster_name = disaster.__class__.__name__
 
@@ -223,6 +262,14 @@ def end_day():
             "A toxic radiation leak poisons the air!",
             "Deadly radiation spreads through the shelter!",
             "A hazardous leak threatens everyone!",
+        ],
+        "Famine": [
+            "A slow famine creeps in, spoiling food.",
+            "Rot spreads through your stores.",
+        ],
+        "BanditRaid": [
+            "Bandits strike under cover of darkness.",
+            "Gunshots echo as bandits loot your supplies.",
         ],
     }
 
@@ -253,9 +300,20 @@ def end_day():
 # =========================
 
 monster_list = [
-    {"name": "Zombie", "health": 15, "attack": 3},
-    {"name": "Bloated Zombie", "health": 20, "attack": 4},
-    {"name": "Fast Zombie", "health": 12, "attack": 5},
+    {"name": "Zombie", "health": 15, "attack": 3, "ability": "none"},
+    {"name": "Bloated Zombie", "health": 22, "attack": 3, "ability": "on_death_explode"},
+    {"name": "Fast Zombie", "health": 12, "attack": 6, "ability": "double_attack_chance"},
+    {"name": "Junk Armour Zombie", "health": 35, "attack": 3, "ability": "reduced_damage"},
+    {"name": "Exploding Pus Zombie", "health": 2, "attack": 4, "ability": "on_death_big_explode"},
+    {"name": "Cannibal", "health": 14, "attack": 5, "ability": "lifesteal"},
+    {"name": "Eradiated Camel", "health": 25, "attack": 3, "ability": "radiation_dot"},
+    {"name": "Giant Spider", "health": 10, "attack": 4, "ability": "poison"},
+    {"name": "Zombie that had once been a Jehova's witness", "health": 12, "attack": 5, "ability": "talk_stun"},
+    {"name": "Kangaroo Zombie", "health": 10, "attack": 10, "ability": "high_crit"},
+    {"name": "Other Survivors", "health": 18, "attack": 4, "ability": "steal_ammo"},
+    {"name": "Wombat with Human Intellect", "health": 11, "attack": 2, "ability": "burrow_block"},
+    {"name": "Shaolin Zombie", "health": 16, "attack": 5, "ability": "counter"},
+    {"name": "Gorilla that had previously killed 100 men", "health": 110, "attack": 20, "ability": "enrage"},
 ]
 
 def start_hunt():
@@ -271,7 +329,13 @@ def start_hunt():
     game_state["current_survivor"] = survivor
 
     if "role_instance" not in survivor:
-        role_map = {"Combatant": Combatant, "Healer": Healer, "Builder": Builder}
+        role_map = {
+            "Combatant": Combatant,
+            "Healer": Healer,
+            "Builder": Builder,
+            "Scout": Scout,
+            "Guardian": Guardian,
+        }
         role_cls = role_map.get(survivor["role"], Combatant)
         survivor["role_instance"] = role_cls()
 
@@ -309,6 +373,54 @@ def end_hunt():
     update_hunt_ui()
     update_combat_ui()
 
+def apply_monster_ability_on_hit(monster, survivor, damage):
+    ability = monster.get("ability", "none")
+    # abilities that modify damage or add effects
+    if ability == "lifesteal":
+        heal = damage // 2
+        monster["health"] += heal
+        slow_print(f"The {monster['name']} feeds on flesh and heals {heal} HP.")
+    elif ability == "radiation_dot":
+        extra = random.randint(1, 3)
+        survivor["health"] -= extra
+        slow_print(f"Radiation burns {survivor['name']} for extra {extra} damage.")
+    elif ability == "poison":
+        extra = random.randint(2, 4)
+        survivor["health"] -= extra
+        slow_print(f"Poison seeps into {survivor['name']}'s veins for {extra} extra damage.")
+    elif ability == "high_crit":
+        if random.randint(1, 4) == 1:
+            crit = damage
+            survivor["health"] -= crit
+            slow_print(f"The {monster['name']} lands a brutal kick for extra {crit} damage!")
+    elif ability == "steal_ammo":
+        stolen = min(game_state["ammo"], random.randint(1, 3))
+        game_state["ammo"] -= stolen
+        slow_print(f"The {monster['name']} steals {stolen} ammo from your supplies!")
+    elif ability == "enrage":
+        if monster["health"] < 40 and not monster.get("enraged", False):
+            monster["enraged"] = True
+            monster["attack"] += 5
+            slow_print(f"The {monster['name']} becomes enraged! Its attacks grow stronger.")
+
+def apply_monster_ability_on_death(monster, survivor):
+    ability = monster.get("ability", "none")
+    if ability == "on_death_explode":
+        dmg = random.randint(3, 7)
+        survivor["health"] -= dmg
+        slow_print(f"The {monster['name']} bursts, splashing bile! {survivor['name']} takes {dmg} damage.")
+    elif ability == "on_death_big_explode":
+        dmg = random.randint(8, 15)
+        survivor["health"] -= dmg
+        slow_print(f"The {monster['name']} detonates violently! {survivor['name']} takes {dmg} massive damage.")
+
+def maybe_monster_counter(monster, survivor, damage_dealt):
+    ability = monster.get("ability", "none")
+    if ability == "counter" and random.randint(1, 3) == 1:
+        counter_dmg = random.randint(3, 7)
+        survivor["health"] -= counter_dmg
+        slow_print(f"The {monster['name']} counters the attack! {survivor['name']} takes {counter_dmg} damage.")
+
 def player_turn(action):
     survivor = game_state["current_survivor"]
     monster = game_state["current_monster"]
@@ -319,9 +431,15 @@ def player_turn(action):
 
     if action == "attack":
         damage = role_inst.perform_attack() if role_inst else random.randint(3, 7)
+        # Junk Armour reduces damage
+        if monster.get("ability") == "reduced_damage":
+            reduced = max(1, damage - 2)
+            slow_print(f"The {monster['name']}'s junk armour absorbs some damage ({damage}->{reduced}).")
+            damage = reduced
         monster["health"] -= damage
         slow_print(f"\n{survivor['name']} strikes the {monster['name']} for {damage} damage!")
         game_state["blocking"] = False
+        maybe_monster_counter(monster, survivor, damage)
 
     elif action == "block":
         game_state["blocking"] = True
@@ -352,6 +470,15 @@ def player_turn(action):
 
     if monster["health"] <= 0:
         slow_print(f"\nYou defeated the {monster['name']}!")
+        apply_monster_ability_on_death(monster, survivor)
+        if survivor["health"] <= 0:
+            slow_print(f"{survivor['name']} dies from the monster's death throes.")
+            if survivor in game_state["survivors"]:
+                game_state["survivors"].remove(survivor)
+            end_hunt()
+            update_shelter_ui()
+            return
+
         if survivor["role"] == "Combatant":
             ammo_found = random.randint(1, 3)
             game_state["ammo"] += ammo_found
@@ -364,6 +491,10 @@ def player_turn(action):
             scrap_found = random.randint(1, 3)
             game_state["scrap"] += scrap_found
             slow_print(f"Found {scrap_found} scrap metal!")
+        elif survivor["role"] == "Scout":
+            bonus_food = random.randint(1, 4)
+            game_state["food"] += bonus_food
+            slow_print(f"The Scout recovers {bonus_food} extra food from the corpse.")
         end_hunt()
         update_shelter_ui()
         return
@@ -376,6 +507,7 @@ def enemy_turn():
     if survivor is None or monster is None:
         return
 
+    # Fast zombie: chance to block instead of attack
     if random.randint(1, 6) == 6:
         monster["blocking"] = True
         slow_print(f"\nThe {monster['name']} raises its guard and prepares to block!")
@@ -383,11 +515,25 @@ def enemy_turn():
         monster["blocking"] = False
 
     damage = monster["attack"]
+
+    # Guardian blocks better
     if game_state["blocking"]:
-        damage = max(1, damage // 2)
-        slow_print(f"{survivor['name']} blocks part of the attack!")
+        if survivor.get("role") == "Guardian":
+            damage = max(1, damage // 3)
+            slow_print(f"{survivor['name']} (Guardian) absorbs most of the attack!")
+        else:
+            damage = max(1, damage // 2)
+            slow_print(f"{survivor['name']} blocks part of the attack!")
+
     survivor["health"] -= damage
     slow_print(f"\nThe {monster['name']} attacks! {survivor['name']} takes {damage} damage.")
+    apply_monster_ability_on_hit(monster, survivor, damage)
+
+    # Fast zombie: chance for extra attack
+    if monster.get("ability") == "double_attack_chance" and random.randint(1, 4) == 1 and survivor["health"] > 0:
+        extra = max(1, monster["attack"] // 2)
+        survivor["health"] -= extra
+        slow_print(f"The {monster['name']} lunges again for {extra} extra damage!")
 
     if survivor["health"] <= 0:
         slow_print(f"\n{survivor['name']} has died.")
@@ -404,6 +550,69 @@ def enemy_turn():
 # === SCAVENGE MODE       ===
 # ============================
 
+SCAVENGE_LOCATIONS = [
+    {
+        "name": "Ruined Supermarket",
+        "desc": "Shelves toppled, aisles dark, but food might remain.",
+        "weights": {
+            "find_food": 30,
+            "find_medicine": 10,
+            "find_scrap": 10,
+            "find_ammo": 5,
+            "find_survivor": 5,
+            "ambush": 10,
+            "injury": 5,
+            "mini_disaster": 3,
+            "nothing": 2,
+        },
+    },
+    {
+        "name": "Abandoned Clinic",
+        "desc": "Dusty corridors and silent wards—medicine could still be here.",
+        "weights": {
+            "find_food": 10,
+            "find_medicine": 30,
+            "find_scrap": 10,
+            "find_ammo": 5,
+            "find_survivor": 10,
+            "ambush": 10,
+            "injury": 5,
+            "mini_disaster": 3,
+            "nothing": 2,
+        },
+    },
+    {
+        "name": "Industrial Yard",
+        "desc": "Twisted metal and broken machinery—scrap heaven, danger included.",
+        "weights": {
+            "find_food": 5,
+            "find_medicine": 5,
+            "find_scrap": 35,
+            "find_ammo": 10,
+            "find_survivor": 5,
+            "ambush": 15,
+            "injury": 10,
+            "mini_disaster": 5,
+            "nothing": 2,
+        },
+    },
+    {
+        "name": "Military Checkpoint",
+        "desc": "Abandoned barricades and rusted vehicles—ammo and gear, if you survive.",
+        "weights": {
+            "find_food": 10,
+            "find_medicine": 10,
+            "find_scrap": 15,
+            "find_ammo": 25,
+            "find_survivor": 5,
+            "ambush": 20,
+            "injury": 10,
+            "mini_disaster": 5,
+            "nothing": 2,
+        },
+    },
+]
+
 def start_scavenge():
     if game_state["in_hunt"] or game_state["in_scavenge"]:
         messagebox.showwarning("Warning", "Already on a mission!")
@@ -416,7 +625,21 @@ def start_scavenge():
     game_state["current_survivor"] = survivor
     game_state["in_scavenge"] = True
 
-    slow_print(f"\n{survivor['name']} heads out to scavenge...")
+    if "role_instance" not in survivor:
+        role_map = {
+            "Combatant": Combatant,
+            "Healer": Healer,
+            "Builder": Builder,
+            "Scout": Scout,
+            "Guardian": Guardian,
+        }
+        survivor["role_instance"] = role_map.get(survivor["role"], Combatant)()
+
+    location = random.choice(SCAVENGE_LOCATIONS)
+    game_state["current_scavenge_location"] = location
+    slow_print(f"\n{survivor['name']} heads out to scavenge at the {location['name']}...")
+    slow_print(location["desc"])
+
     scavenge_button.config(state=tk.DISABLED)
     start_hunt_button.config(state=tk.DISABLED)
 
@@ -425,20 +648,24 @@ def start_scavenge():
 def resolve_scavenge():
     survivor = game_state["current_survivor"]
     game_state["in_scavenge"] = False
+    location = game_state["current_scavenge_location"] or SCAVENGE_LOCATIONS[0]
+    base_weights = location["weights"].copy()
 
-    events = [
-        ("find_food", 25),
-        ("find_medicine", 15),
-        ("find_scrap", 20),
-        ("find_ammo", 10),
-        ("find_survivor", 10),
-        ("ambush", 10),
-        ("injury", 5),
-        ("mini_disaster", 3),
-        ("nothing", 2),
-    ]
+    role_inst = survivor.get("role_instance", None)
+    if role_inst:
+        bonus = role_inst.scavenge_bonus(game_state)
+        if "good_find_bonus" in bonus:
+            for key in ["find_food", "find_medicine", "find_scrap", "find_ammo", "find_survivor"]:
+                base_weights[key] = max(0, base_weights.get(key, 0) + bonus["good_find_bonus"])
+        if "ambush_penalty" in bonus:
+            base_weights["ambush"] = max(0, base_weights.get("ambush", 0) + bonus["ambush_penalty"])
 
+    events = list(base_weights.items())
     total = sum(w for _, w in events)
+    if total <= 0:
+        events = [("nothing", 1)]
+        total = 1
+
     r = random.randint(1, total)
     cumulative = 0
     outcome = "nothing"
@@ -469,16 +696,20 @@ def resolve_scavenge():
         slow_print(f"{survivor['name']} finds {amount} ammo.")
 
     elif outcome == "find_survivor":
-        new_name = random.choice(["Alex", "Morgan", "Sam", "Riley", "Jordan", "Casey"])
-        new_survivor = {
-            "name": new_name,
-            "health": random.randint(60, 100),
-            "max_health": 100,
-            "role": "Combatant",
-            "hunger": 0
-        }
-        game_state["survivors"].append(new_survivor)
-        slow_print(f"{survivor['name']} finds a new survivor: {new_name} joins the shelter.")
+        if len(game_state["survivors"]) >= max_survivors():
+            slow_print(f"{survivor['name']} finds someone, but the shelter is full. They move on.")
+        else:
+            new_name = random.choice(["Alex", "Morgan", "Sam", "Riley", "Jordan", "Casey", "Harper", "Quinn"])
+            new_survivor = {
+                "name": new_name,
+                "health": random.randint(60, 100),
+                "max_health": 100,
+                "role": random.choice(["Combatant", "Healer", "Builder", "Scout", "Guardian"]),
+                "hunger": 0
+            }
+            game_state["survivors"].append(new_survivor)
+            slow_print(f"{survivor['name']} finds a new survivor: {new_name} joins the shelter.")
+            rebuild_survivor_buttons()
 
     elif outcome == "ambush":
         slow_print(f"{survivor['name']} is ambushed by zombies!")
@@ -493,6 +724,7 @@ def resolve_scavenge():
             slow_print(f"{survivor['name']} dies from their wounds.")
             if survivor in game_state["survivors"]:
                 game_state["survivors"].remove(survivor)
+            rebuild_survivor_buttons()
 
     elif outcome == "mini_disaster":
         dmg = random.randint(5, 15)
@@ -511,7 +743,13 @@ def start_scavenge_combat():
     survivor = game_state["current_survivor"]
 
     if "role_instance" not in survivor:
-        role_map = {"Combatant": Combatant, "Healer": Healer, "Builder": Builder}
+        role_map = {
+            "Combatant": Combatant,
+            "Healer": Healer,
+            "Builder": Builder,
+            "Scout": Scout,
+            "Guardian": Guardian,
+        }
         survivor["role_instance"] = role_map.get(survivor["role"], Combatant)()
 
     game_state["current_monster"] = random.choice(monster_list).copy()
@@ -698,6 +936,7 @@ def update_shelter_ui():
     scrap_label.config(text=f"Scrap: {game_state['scrap']}")
     shelter_hp_label.config(text=f"Shelter HP: {game_state['shelter_health']}/{game_state['max_shelter_health']}")
     grid_size_label.config(text=f"Shelter Size: {game_state['grid_size']}x{game_state['grid_size']}")
+    cap_label.config(text=f"Survivor Cap: {len(game_state['survivors'])}/{max_survivors()}")
 
     survivors_text = "Survivors:\n"
     for survivor in game_state["survivors"]:
@@ -708,6 +947,7 @@ def update_shelter_ui():
     survivors_label.config(text=survivors_text)
 
     update_grid_ui()
+    rebuild_survivor_buttons()
 
 def update_hunt_ui():
     if game_state["in_hunt"] and game_state["current_survivor"]:
@@ -740,13 +980,26 @@ def disable_combat_buttons():
     potion_button.config(state=tk.DISABLED)
     run_button.config(state=tk.DISABLED)
 
+def rebuild_survivor_buttons():
+    for widget in role_select_frame.winfo_children():
+        widget.destroy()
+    for i, survivor in enumerate(game_state["survivors"]):
+        tk.Button(
+            role_select_frame,
+            text=survivor["name"],
+            command=lambda s=survivor: select_survivor(s),
+            font=custom_font,
+            bg="#4CAF50",
+            fg="white"
+        ).grid(row=0, column=i, padx=3, pady=3)
+
 # =====================
 # === TKINTER SETUP ===
 # =====================
 
 root = tk.Tk()
-root.title("Zombie Survival Shelter - Unified + Scavenge")
-root.geometry("1000x800")
+root.title("Zombie Survival Shelter - Expanded Scavenge & Enemies")
+root.geometry("1100x800")
 
 custom_font = font.Font(family="Helvetica", size=10)
 title_font = font.Font(family="Helvetica", size=12, weight="bold")
@@ -796,6 +1049,8 @@ shelter_hp_label = tk.Label(stats_frame, text="", font=custom_font)
 shelter_hp_label.grid(row=5, column=0, sticky="w")
 grid_size_label = tk.Label(stats_frame, text="", font=custom_font)
 grid_size_label.grid(row=6, column=0, sticky="w")
+cap_label = tk.Label(stats_frame, text="", font=custom_font)
+cap_label.grid(row=7, column=0, sticky="w")
 
 survivors_frame = tk.LabelFrame(left_frame, text="Survivors", font=title_font)
 survivors_frame.grid(row=1, column=0, sticky="nsew", pady=5)
@@ -806,16 +1061,6 @@ survivors_label.grid(row=0, column=0, sticky="w")
 
 role_select_frame = tk.LabelFrame(left_frame, text="Select Survivor", font=title_font)
 role_select_frame.grid(row=2, column=0, sticky="nsew", pady=5)
-
-for i, survivor in enumerate(game_state["survivors"]):
-    tk.Button(
-        role_select_frame,
-        text=survivor["name"],
-        command=lambda s=survivor: select_survivor(s),
-        font=custom_font,
-        bg="#4CAF50",
-        fg="white"
-    ).grid(row=0, column=i, padx=3, pady=3)
 
 role_assign_frame = tk.LabelFrame(left_frame, text="Assign Role", font=title_font)
 role_assign_frame.grid(row=3, column=0, sticky="nsew", pady=5)
@@ -846,6 +1091,24 @@ tk.Button(
     bg="#FFC107",
     fg="black"
 ).grid(row=0, column=2, padx=3, pady=3)
+
+tk.Button(
+    role_assign_frame,
+    text="Scout",
+    command=lambda: assign_role(game_state["current_survivor"], Scout()),
+    font=custom_font,
+    bg="#8BC34A",
+    fg="black"
+).grid(row=0, column=3, padx=3, pady=3)
+
+tk.Button(
+    role_assign_frame,
+    text="Guardian",
+    command=lambda: assign_role(game_state["current_survivor"], Guardian()),
+    font=custom_font,
+    bg="#9C27B0",
+    fg="white"
+).grid(row=0, column=4, padx=3, pady=3)
 
 build_frame = tk.LabelFrame(left_frame, text="Shelter Actions", font=title_font)
 build_frame.grid(row=4, column=0, sticky="nsew", pady=5)
@@ -993,8 +1256,9 @@ health_label.grid(row=1, column=0, sticky="w", padx=10)
 monster_label = tk.Label(bottom_frame, text="", font=custom_font)
 monster_label.grid(row=1, column=1, sticky="w", padx=10)
 
+rebuild_survivor_buttons()
 update_shelter_ui()
-slow_print("Welcome to Zombie Survival Shelter (Unified + Scavenge)!")
+slow_print("Welcome to Zombie Survival Shelter - Expanded Scavenge & Enemies!")
 slow_print("Manage survivors, build and expand your shelter, hunt, scavenge, and survive as long as you can.")
 
 root.mainloop()
